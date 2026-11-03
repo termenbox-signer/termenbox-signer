@@ -20,6 +20,7 @@ Beta and nightly bundles are not signed with these keys.
 Compare the fingerprint with the one the project ships. In a checkout of `termenbox/termenbox`:
 
 ```sh
+node scripts/bundle-sign.mjs fingerprint packages/client/bundle-keys.txt stable
 ```
 
 The output must list exactly the two fingerprints above. Anything else, or a different number of keys, is wrong.
