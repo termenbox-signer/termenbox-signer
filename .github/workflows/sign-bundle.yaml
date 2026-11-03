@@ -1,0 +1,90 @@
+name: Sign client bundle
+
+# Signs the staged client bundle of a termenbox release, after checking it independently.
+# Runs only by hand, in the `signer` environment (required reviewer = you, branch policy = main).
+# It runs no code from the source repo: the checks below are in this file.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag in the source repo that holds client-bundle.tar and bundle.json'
+        required: true
+      channel:
+        description: 'Channel the bundle is for'
+        required: true
+        type: choice
+        options: [stable, beta, nightly]
+      source_repo:
+        description: 'Source repository'
+        required: true
+        default: 'termenbox/termenbox'
+
+permissions:
+  contents: write   # publishes the signature as a release in THIS repo
+
+concurrency: sign-bundle
+
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    environment: signer
+    timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.tag }}
+      CHANNEL: ${{ inputs.channel }}
+      SOURCE: ${{ inputs.source_repo }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate the inputs
+        run: |
+          set -eu
+          printf '%s' "$TAG" | grep -Eq '^v[0-9A-Za-z._-]+$' || { echo "bad tag"; exit 1; }
+          printf '%s' "$SOURCE" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || { echo "bad source repo"; exit 1; }
+
+      - name: Download the staged bundle
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/in"
+          gh release download "$TAG" --repo "$SOURCE" -p client-bundle.tar -p bundle.json -D "$RUNNER_TEMP/in"
+
+      - name: Check the bundle against its own list
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/in"
+          mkdir d
+          tar -xf client-bundle.tar -C d --no-same-owner
+          test -z "$(find d ! -type f ! -type d)" || { echo "the archive holds links or special files"; exit 1; }
+          test "$(jq -r .channel bundle.json)" = "$CHANNEL" || { echo "bundle.json is for another channel"; exit 1; }
+          # every listed file matches its hash
+          jq -r '.files | to_entries[] | "\(.value)  \(.key)"' bundle.json | (cd d && sha256sum -c --quiet -)
+          # and nothing unlisted is in the archive
+          diff <(jq -r '.files | keys[]' bundle.json | LC_ALL=C sort) \
+               <(cd d && find . -type f ! -name bundle.json ! -name bundle.json.sig | sed 's|^\./||' | LC_ALL=C sort)
+          {
+            echo "### Signing $TAG ($CHANNEL)"
+            echo "version: $(jq -r .version bundle.json)"
+            echo "files: $(jq '.files | length' bundle.json)"
+            echo "bundle.json sha256: $(sha256sum bundle.json | cut -d' ' -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign bundle.json
+        env:
+          KEY: ${{ secrets.BUNDLE_SIGNING_KEY }}
+        run: |
+          set -eu
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/key"
+          ssh-keygen -Y sign -f "$RUNNER_TEMP/key" -n termenbox-bundle "$RUNNER_TEMP/in/bundle.json"
+          rm -f "$RUNNER_TEMP/key"
+          ssh-keygen -y -f /dev/null >/dev/null 2>&1 || true
+
+      - name: Publish the signature
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/in"
+          cp bundle.json.sig "$RUNNER_TEMP/bundle.json.sig"
+          cp bundle.json "$RUNNER_TEMP/bundle.json"
+          gh release create "$CHANNEL-$TAG" "$RUNNER_TEMP/bundle.json.sig" "$RUNNER_TEMP/bundle.json" \
+            --repo "$GITHUB_REPOSITORY" --title "$CHANNEL $TAG" \
+            --notes "Signature of bundle.json for $SOURCE $TAG ($CHANNEL)."
