@@ -77,7 +77,6 @@ jobs:
           printf '%s\n' "$KEY" > "$RUNNER_TEMP/key"
           ssh-keygen -Y sign -f "$RUNNER_TEMP/key" -n termenbox-bundle "$RUNNER_TEMP/in/bundle.json"
           rm -f "$RUNNER_TEMP/key"
-          ssh-keygen -y -f /dev/null >/dev/null 2>&1 || true
 
       - name: Publish the signature
         run: |
